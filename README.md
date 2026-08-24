@@ -183,7 +183,11 @@ to `~/.dsh/profiles/web/cordis.patch.yml`:
   trivial turns, and can be turned off with `forceRecallStep`.
 - **Trivial-input guard** ([src/guards.js](src/guards.js)). Pure greetings,
   confirmations, and slash commands are classified by exact whole-string match
-  against word lists — a real sentence is never misclassified.
+  against word lists — a real sentence is never misclassified. The same word
+  list backs an explicit exemption written into both the usage section and the
+  `mem0_search` description: when the ENTIRE message is a bare
+  acknowledgement/continuation (好的、嗯、收到、继续、ok…), the search is
+  skipped; any actual content restores the mandatory search.
 - **Query distillation.** Ported from hermes
   `agent/memory_manager.py::_distill_query`, applied to the *recall query only*
   (never the write path):
