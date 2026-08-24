@@ -1,28 +1,33 @@
 # dsh-mem0-plugins bundle patch
 #
-# 安装（标准 bundle 插件，不改 dsh 源码）：
-#   dsh plugin --profile web add /data/code/mem0_falkordb/plugins/dsh-mem0-plugins
-# 卸载：
+# Install (standard bundle plugin, no dsh source changes):
+#   dsh plugin --profile web add /path/to/dsh-mem0-plugins
+# Uninstall:
 #   dsh plugin --profile web remove dsh-mem0-plugins
-# 安装/卸载/改配置后重启 dsh 生效（设置页内的改动即时生效，无需重启）。
+# Restart dsh after install/uninstall/config-file changes (settings-page edits
+# apply immediately without a restart).
 #
-# 本补丁只做一件事：把本插件的 provider 行挂进 profile 层，默认指向本机
-# 自托管 Mem0 server（http://127.0.0.1:8888），enabled 走 schema 默认 true——
-# 装好即启用（本机 server 无鉴权时零配置直接工作；远程 server 需在设置页填
-# API Key）。要关闭记忆，在设置页关闭「启用插件」开关即可。
+# This patch does one thing: attach this plugin's provider row at the profile
+# layer, pointing at the local self-hosted Mem0 server (http://127.0.0.1:8888).
+# `enabled` follows the schema default true — enabled out of the box (a local
+# AUTH_DISABLED server works with zero config; fill in the API key in the
+# settings page for remote servers). To disable memory, flip "Enable plugin"
+# off in the settings card.
 #
-# 这些值是 settings 的 composition base 层；用户在设置页保存的值落在用户层，
-# 优先级更高。要改默认值可在 ~/.dsh/profiles/web/cordis.patch.yml 追加覆盖：
+# These values are the settings composition base layer; values saved in the
+# settings page live in the user layer and take precedence. To override the
+# defaults, append to ~/.dsh/profiles/web/cordis.patch.yml:
 #   - id: mem0
 #     config:
-#       host: http://10.200.0.5:8888
+#       host: http://mem0.internal:8888
 #       apiKey: your-admin-api-key
 
 - insert:
     - id: mem0
       name: dsh-mem0-plugins
       config:
-        # 不写 enabled：schema 默认 true（配置即启用）；用户可在设置页显式关闭
+        # `enabled` intentionally omitted: schema default is true (enabled on
+        # install); users can turn it off explicitly in the settings page.
         host: http://127.0.0.1:8888
         apiKey: ''
         userId: dsh-user

@@ -1,216 +1,261 @@
-# dsh-mem0-plugins — Mem0 持久记忆插件（DSH 自托管版）
+# dsh-mem0-plugins
 
-把 hermes 版 mem0 记忆插件的「全自动记忆」移植到 DeepSeek Harness (dsh)，做成标准
-bundle 插件：`dsh plugin add` 安装、`dsh plugin remove` 卸载，**不改任何 dsh 源码**。
-只支持**自托管 Mem0 server**（HTTP + `X-API-Key`），不做 cloud/OSS 模式。
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522-green.svg)](package.json)
+[![Platform](https://img.shields.io/b/platform/DeepSeek%20Harness-orange)](https://deepseek.com)
 
-## 它会自动做什么
+English | [简体中文](README.zh-CN.md)
 
-| 能力 | 触发时机 | 说明 |
-|------|----------|------|
-| **自动召回（工具驱动）** | 模型回答前 | usage 节强引导模型先调 `mem0_search`——UI 工具卡即召回动作的可见呈现；长查询先蒸馏提炼意图再搜索 |
-| **使用引导** | 常驻 | 系统提示中注册使用说明节，引导模型对用户相关的问题主动调 `mem0_search`（多角度多跳） |
-| **自动写入** | 每轮对话结束 | 把「用户消息 + 助手回复」交给服务端 LLM 抽取事实（`infer: true`）；纯 JSON 的工具输出会被替换成占位符防污染 |
-| **潮浪并忆** | 写入时 | 同一会话的短对话按 user 分桶合并：空闲 5s / 窗口 15s / 5 轮 / 4000 字符任一达标即合并为一次批量写入，摊薄抽取调用；超长消息(>2000 字符)走快速直写 |
-| **反馈闭环** | update/delete 后 | best-effort 上报 `/evolve/feedback`（correction/useless），参与服务端 salience 进化 |
+Persistent memory for the **DeepSeek Harness (dsh)** web profile, backed by a
+self-hosted [Mem0](https://github.com/mem0ai/mem0) server. The plugin gives your
+agent long-term memory with zero manual effort: relevant memories are recalled
+before answering, and every finished conversation turn is distilled into facts
+and written back automatically.
 
-## 四个模型工具
+> [!IMPORTANT]
+> **Compatibility — read this first.** This plugin speaks the custom HTTP API of
+> [`dlhermes/mem0_falkordb`](https://github.com/dlhermes/mem0_falkordb)
+> (`X-API-Key` auth, `POST /search`, `POST/PUT/DELETE /memories`,
+> `POST /evolve/feedback`) and works **only** against a server deployed from that
+> project. It does **not** support Mem0 Cloud or the official mem0 OSS REST/SDK
+> API, and it is not a drop-in for other Mem0 deployments.
 
-| 工具 | 用途 |
-|------|------|
-| `mem0_search` | 语义搜索用户记忆（支持 top_k / rerank 覆盖） |
-| `mem0_add` | 逐字存储持久事实（不走 LLM 抽取） |
-| `mem0_update` | 按 ID 改错（上报 correction 反馈） |
-| `mem0_delete` | 按 ID 遗忘（上报 useless 反馈） |
+It ships as a standard dsh bundle plugin: `dsh plugin add` to install,
+`dsh plugin remove` to uninstall. It changes no dsh source code.
 
-## 安装 / 卸载
+---
+
+## Table of Contents
+
+- [What it does automatically](#what-it-does-automatically)
+- [Model tools](#model-tools)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Configuration](#configuration)
+  - [Connection & identity](#connection--identity)
+  - [Automatic recall & query distillation](#automatic-recall--query-distillation)
+  - [Automatic write-back (tidal coalescing)](#automatic-write-back-tidal-coalescing)
+  - [Reliability & timeouts](#reliability--timeouts)
+- [Recall design](#recall-design)
+- [Reliability design](#reliability-design)
+- [Observability](#observability)
+- [Development & testing](#development--testing)
+- [Troubleshooting](#troubleshooting)
+- [Documentation](#documentation)
+- [License](#license)
+
+## What it does automatically
+
+| Capability | When | How |
+|---|---|---|
+| **Tool-driven recall** | Before each answer | A persistent usage section steers the model to call `mem0_search` first; the UI tool card makes the recall visible. Long queries are distilled before searching. |
+| **Forced recall step** | First step of every turn | Injects a plugin-source reminder ("search memory before answering") via `agent/pre-step`. Trivial turns are skipped; disable with `forceRecallStep`. |
+| **Automatic write-back** | After every completed turn | Sends "user message + assistant reply" to the server-side LLM extraction (`infer: true`). Pure-JSON tool output is replaced with placeholders so key names never leak in as "facts". |
+| **Tidal coalescing** | At write time | Short turns of the same session are bucketed per user and flushed as one batched write (idle 5 s / window 15 s / 5 turns / 4 000 chars — whichever hits first), amortizing server LLM extraction calls. Oversized messages (> 2 000 chars) bypass the bucket and write directly. |
+| **Evolve feedback loop** | After update/delete | Best-effort `POST /evolve/feedback` (`correction` / `useless`) feeds the server-side salience evolution. |
+
+Interrupted turns are never written: a half-streamed reply is not a durable
+conversation truth.
+
+## Model tools
+
+Four tools are registered under the dsh agent:
+
+| Tool | Purpose |
+|---|---|
+| `mem0_search` | Semantic search over the user's memories (per-call `top_k` / `rerank` overrides). |
+| `mem0_add` | Store a durable fact verbatim — no server-side LLM extraction. |
+| `mem0_update` | Fix an existing memory by ID (reports `correction` feedback). |
+| `mem0_delete` | Forget a memory by ID (reports `useless` feedback). |
+
+## Requirements
+
+- Node.js ≥ 22 and a working [DeepSeek Harness](https://deepseek.com) install
+  (web profile).
+- A running [dlhermes/mem0_falkordb](https://github.com/dlhermes/mem0_falkordb)
+  server reachable over HTTP (e.g. `http://127.0.0.1:8888`).
+- If the server runs with auth enabled, an API key created from its dashboard.
+  With `AUTH_DISABLED=true`, leave the key empty.
+
+## Installation
 
 ```bash
-# 安装（web profile；安装后重启 dsh 生效）
-dsh plugin --profile web add /data/code/mem0_falkordb/plugins/dsh-mem0-plugins
+# Install into the web profile (restart dsh afterwards)
+dsh plugin --profile web add /path/to/dsh-mem0-plugins
 
-# 卸载
+# Uninstall
 dsh plugin --profile web remove dsh-mem0-plugins
 ```
 
-装好即默认启用（`enabled` 默认 `true`，指向本机 server 时零配置可用）；
-设置页改动即时生效，无需重启。要关闭记忆，在卡片里关掉「启用插件」开关——
-卡片描述行实时显示 **已启用/未启用 + host**，一眼可见。
+The plugin is **enabled by default** and needs zero configuration when pointed
+at a local `AUTH_DISABLED` server. Changes made in the settings page take effect
+immediately — no restart needed. To turn memory off entirely, flip **Enable
+plugin** off in the settings card; the card header always shows the current
+enabled state and host at a glance.
 
-## 设置项
+## Configuration
 
-默认值：`enabled=true`（schema 默认，patch 不覆盖——配置即启用）、
-`host=http://127.0.0.1:8888`、`apiKey=''`（本机 server 无鉴权时零配置可用）。
-设置页保存的值落在用户层，优先级更高。
+All settings live in the dsh settings page under the `mem0` namespace. Values
+saved there override profile-layer defaults.
 
-### 连接与身份
+### Connection & identity
 
-| 字段 | 默认 | 说明 |
-|------|------|------|
-| `enabled` | `true` | 总开关，默认开启；关闭后不再召回/写入，工具调用提示未启用 |
-| `host` | `http://127.0.0.1:8888` | 自托管 server URL |
-| `apiKey` | 空 | 以 `X-API-Key` 头发送；`AUTH_DISABLED` 部署留空 |
-| `userId` | `dsh-user` | 记忆归属 user_id，跨会话共享同一份记忆 |
-| `agentId` | `dsh` | 写入附带的 agent_id |
+| Key | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Master switch. When off: no recall, no writes, tools report "plugin disabled". |
+| `host` | `http://127.0.0.1:8888` | Base URL of the self-hosted mem0_falkordb server. |
+| `apiKey` | *(empty)* | Sent as the `X-API-Key` header. Leave empty for `AUTH_DISABLED` deployments. |
+| `userId` | `dsh-user` | Owner of the memories; shared across sessions. |
+| `agentId` | `dsh` | Attached as `agent_id` on writes. |
 
-![连接与身份配置](docs/screenshot/配置展示-1.png)
+![Connection and identity settings](docs/screenshot/settings-connection.png)
 
-### 自动召回
+### Automatic recall & query distillation
 
-| 字段 | 默认 | 说明 |
-|------|------|------|
-| `forceRecallStep` | `true` | **方案 B**：每轮第一步注入『必须先调 mem0_search』提醒（琐碎轮跳过，plugin-source 显示为系统注记不写记忆）；关闭则只靠 usage 引导 |
-| `topK` | `10` | 每次召回最大条数（1–50） |
-| `rerank` | `false` | 开启则以全深度模式请求重排（服务端需配置 reranker） |
-| `distillEnabled` | `true` | 长文本查询蒸馏总开关（见下方「查询蒸馏」） |
-| `distillMinChars` | `500` | 不超过该长度的消息原样直查，零损失零开销 |
-| `distillInputMaxChars` | `8000` | 送入蒸馏模型的原文截断上限 |
-| `distillBaseUrl` | `http://10.220.0.35:8090/v1` | 蒸馏端点（OpenAI 兼容）；留空跳过蒸馏直查原文 |
-| `distillApiKey` | `devops` | Bearer 鉴权，与 hermes 默认一致 |
-| `distillModel` | `Qwen3.5-9B` | 蒸馏模型（本地部署） |
-| `distillTimeoutMs` | `30000` | 蒸馏单次超时 |
-| `distillRetryAfterMs` | `20000` | 双飞触发阈值：首请求无响应超过该时长即并发第二请求，先完成者胜出 |
+| Key | Default | Description |
+|---|---|---|
+| `forceRecallStep` | `true` | Force-recall step (Plan B): inject a "must call `mem0_search` first" notice every turn (trivial turns skipped). Off = rely on usage guidance only. |
+| `topK` | `10` | Max results per search (1–50). |
+| `rerank` | `false` | Request full-depth reranking (server needs a reranker configured). |
+| `distillEnabled` | `true` | Master switch for query distillation (see below). |
+| `distillMinChars` | `500` | Queries up to this length go straight to `/search` unchanged — zero loss, zero extra calls. |
+| `distillInputMaxChars` | `8000` | Truncation cap for text sent to the distillation model. |
+| `distillBaseUrl` | author's private endpoint | OpenAI-compatible endpoint used to distill long queries. Empty = skip distillation. **The shipped default points at the author's internal deployment — override it with your own endpoint.** |
+| `distillApiKey` | author's private key | Bearer token for the distillation endpoint. |
+| `distillModel` | `Qwen3.5-9B` | Distillation model id (a small local model is plenty). |
+| `distillTimeoutMs` | `90000` | Per-request distillation timeout. |
+| `distillRetryAfterMs` | `20000` | Hedged-request threshold: if the first request is still silent after this delay, fire a second concurrent one; first response wins. |
 
-![自动召回配置：条数/重排/蒸馏](docs/screenshot/配置展示-2.png)
+![Recall settings: top-k, rerank, distillation](docs/screenshot/settings-recall-search.png)
 
-![自动召回配置：蒸馏模型/超时/双飞 与 自动写入起始](docs/screenshot/配置展示-3.png)
+![Distillation model, timeout and hedging](docs/screenshot/settings-recall-distill.png)
 
-### 自动写入
+### Automatic write-back (tidal coalescing)
 
-| 字段 | 默认 | 说明 |
-|------|------|------|
-| `syncEnabled` | `true` | 每轮结束写入总开关 |
-| `coalesceEnabled` | `true` | 潮浪并忆合并写入；关闭则逐条直写 |
-| `coalesceIdleMs` | `5000` | 桶内空闲冲刷阈值 |
-| `coalesceWindowMs` | `15000` | 桶窗口冲刷阈值 |
-| `coalesceMaxTurns` | `5` | 桶内轮数上限 |
-| `coalesceMaxChars` | `4000` | 桶内字符上限 |
-| `fastpathChars` | `2000` | 单轮超过该长度直接落库 |
-| `feedbackEnabled` | `true` | update/delete 成功后上报 evolve 反馈（可关） |
+| Key | Default | Description |
+|---|---|---|
+| `syncEnabled` | `true` | End-of-turn write-back master switch. |
+| `coalesceEnabled` | `true` | Bucket short turns and flush merged writes; off = one request per turn. |
+| `coalesceIdleMs` | `5000` | Flush a bucket after this much inactivity. |
+| `coalesceWindowMs` | `15000` | Flush a bucket after this much wall time. |
+| `coalesceMaxTurns` | `5` | Max turns per bucket. |
+| `coalesceMaxChars` | `4000` | Max characters per bucket. |
+| `fastpathChars` | `2000` | Turns longer than this skip the bucket and write immediately. |
+| `feedbackEnabled` | `true` | Report evolve feedback after successful update/delete. |
 
-![自动写入配置：合并阈值/快速直写/进化反馈](docs/screenshot/配置展示-4.png)
+![Write-back settings: coalescing thresholds, fast path, evolve feedback](docs/screenshot/settings-write-back.png)
 
-### 可靠性与超时
+### Reliability & timeouts
 
-| 字段 | 默认 | 说明 |
-|------|------|------|
-| `queueMaxLen` | `50` | 待写队列上限，满时丢最旧 |
-| `breakerThreshold` | `5` | 连续失败达该次数熔断 |
-| `breakerCooldownMs` | `120000` | 熔断冷却时长 |
-| `requestTimeoutMs` | `300000` | 单请求总闸，search/add 共用（对齐 hermes `httpx timeout=300.0`） |
+| Key | Default | Description |
+|---|---|---|
+| `queueMaxLen` | `50` | Pending-write queue cap; oldest entry dropped when full. |
+| `breakerThreshold` | `5` | Consecutive failures that open the circuit breaker. |
+| `breakerCooldownMs` | `120000` | Breaker cooldown before half-open retry. |
+| `requestTimeoutMs` | `300000` | Hard per-request cap shared by search/add (mirrors hermes `httpx timeout=300.0`; worst-case server-side LLM fallback is ~180 s). There is deliberately no second tool-level timeout. |
 
-![可靠性与超时配置：队列/熔断/总闸](docs/screenshot/配置展示-5.png)
+![Reliability settings: queue, breaker, request timeout](docs/screenshot/settings-reliability.png)
 
-要改 profile 层默认值，在 `~/.dsh/profiles/web/cordis.patch.yml` 追加：
+To change profile-layer defaults (applies to all users of the machine), append
+to `~/.dsh/profiles/web/cordis.patch.yml`:
 
 ```yaml
 - id: mem0
   config:
     enabled: true
-    host: http://10.200.0.5:8888
+    host: http://mem0.internal:8888
     apiKey: your-admin-api-key
 ```
 
-## 召回形态
+## Recall design
 
-![记忆召回展示：第一步强制提醒注入 + mem0_search 中文关键词多路召回](docs/screenshot/记忆召回展示.png)
+![Forced recall-step notice plus multi-angle Chinese-keyword mem0_search](docs/screenshot/recall-demo.png)
 
-- **显式工具链路**：不做后台静默预取（dsh 平台在消息回显后无内容注入钩子，
-  详见 `docs/COMPARISON.md` 平台时序约束）；模型按 usage 引导先调 `mem0_search`，
-  工具卡让「召回中」对用户可见，蒸馏/超时/熔断全套在工具内部生效；
-- **第一步强制提醒（方案 B，默认开）**：每轮第一步经 `agent/pre-step` 注入
-  plugin-source 提醒「必须先调 mem0_search」（`form:'notice'` 注记——UI 消息区显示
-  「上下文注入 · dsh-mem0-plugins · 【记忆提醒】回答前必须先调 mem0_search」，
-  折叠行即直接可见，展开可见模型侧全文；不写记忆、琐碎轮跳过、
-  开关 `forceRecallStep` 可关）——把「先搜再答」从模型自觉升级为流程默认。
-- **琐碎输入跳过**（`src/guards.js`，词表扩充成果保留，暂作复用库）：纯问候/确认/
-  斜杠命令词表三分类等价，只整串匹配、带正文永不误伤；
-- **中断轮不入记忆**：被打断的半截回复不会写进 mem0（部分输出不是持久对话真相，
-  对齐 hermes #15218）。
+- **Explicit tool pipeline.** No silent background prefetch — the dsh platform
+  has no content-injection hook after message echo (see
+  [docs/COMPARISON.md](docs/COMPARISON.md) for the platform timing analysis).
+  The model calls `mem0_search` following usage guidance; the tool card shows
+  the recall happening, and distillation / hedging / the breaker all run inside
+  the tool.
+- **Forced recall step (default on).** Every turn's first step gets a
+  plugin-source notice ("answer only after calling `mem0_search`") rendered as a
+  collapsed context-injection line in the UI. It never writes memory, skips
+  trivial turns, and can be turned off with `forceRecallStep`.
+- **Trivial-input guard** ([src/guards.js](src/guards.js)). Pure greetings,
+  confirmations, and slash commands are classified by exact whole-string match
+  against word lists — a real sentence is never misclassified.
+- **Query distillation.** Ported from hermes
+  `agent/memory_manager.py::_distill_query`, applied to the *recall query only*
+  (never the write path):
+  1. Query ≤ `distillMinChars`: search as-is;
+  2. Long queries (pasted logs/code): truncate to `distillInputMaxChars`, ask a
+     small model for a 2–4 keyword retrieval intent, then search with that;
+  3. Language-drift guard: distilled output of Chinese input containing
+     Vietnamese diacritics or other non-Latin/non-CJK characters (an observed
+     small-model routing failure) is treated as pollution and rejected;
+  4. Hedged requests: a silent first request triggers one concurrent retry;
+  5. Total failure: fall back to the raw query — retrieval never silently dies.
 
-## 查询蒸馏（防长文本打爆服务端）
+## Reliability design
 
-移植自 hermes `agent/memory_manager.py::_distill_query`，只作用于**召回查询**，
-不碰写入路径：
+- **Circuit breaker**: `breakerThreshold` consecutive failures pause all mem0
+  traffic; auto half-open after `breakerCooldownMs`. HTTP 404 / not-found style
+  client errors don't count toward the breaker.
+- **Connection-level retry**: connection-refused/DNS failures retry once — the
+  request most likely never reached the server, so no duplicate writes.
+- **Bounded queue**: pending writes capped at `queueMaxLen` (oldest dropped) so
+  a long server outage can't grow memory unbounded.
+- **Flush-on-dispose**: all open coalescing buckets are flushed when the plugin
+  stops — queued memories are never lost.
 
-1. 消息 ≤500 字符：原样直查——零语义损失、零额外调用；
-2. 超长消息（贴日志/代码）：截断前 8000 字符送本地小模型提炼成「2–4 关键词或
-   一句检索意图」再去 `/search`，embedding 与检索不再吃整段噪音；
-3. **语言漂移防护**：中文输入的蒸馏结果若出现越南语重音字符或非拉丁非 CJK
-   文字（聚合网关路由漂移到多语小模型的实证症状），判为污染即回退；
-4. **并发双飞**：首请求 20s 无响应即并发第二请求（首个不取消），先完成者胜出；
-5. 全部失败/超时：回退原始 query，检索永不静默丢失。
+## Observability
 
-真机记录（2026-08-23，Qwen3.5-9B @10.220.0.35:8090）：
+Coalescing and write-path hygiene counters go to the **dsh host process logs**
+(not the browser): the plugin logs through both `ctx.logger` (internal) and
+`console.log/warn` (host stdout). With systemd: `journalctl -u dsh.service -f`;
+otherwise watch the dsh process stdout.
 
-```
-原文长度: 4250 → distilled 4250 -> 17 chars (6480 ms)
-蒸馏结果: mem0 服务端部署端口和内网地址
-```
+Every merged flush logs one info line with cumulative totals:
 
-## 可靠性设计
-
-- **熔断器**：连续失败 ≥5 次（可配）暂停所有 mem0 调用，冷却 120s 后自动恢复；
-  404/not found 类客户端错误不计入熔断。
-- **连接级重试**：连接拒绝/DNS 类失败自动重试一次（此时请求大概率没到达服务端，
-  不会造成重复写入）。
-- **有界队列**：待写队列满（默认 50）丢最旧，防止服务端长时间不可用时内存膨胀。
-- **兜底冲刷**：插件 dispose 时冲刷全部合并桶，记忆不丢失。
-
-## 可观测（潮浪收益与卫生计数在哪里看）
-
-潮浪并忆与写路径卫生的计数不打到浏览器，落在 **dsh 宿主进程日志**：
-
-- **日志通道**：插件 `info`/`warn` 双通道——`ctx.logger`（dsh 内部日志，默认不透出
-  stdout）+ `console.log/warn` 直出**宿主进程 stdout**。systemd 部署看
-  `journalctl -u dsh.service -f`，非 systemd 看 dsh 进程的 stdout 输出。
-- **每次合并冲刷**（info 级）打一条，含累计 totals：
-
-```
+```text
 [dsh-mem0] mem0 coalesced 3 turn(s) into 1 write (session=<id>, saved 2 call(s), chars=512, trigger=idle; totals: batches=12 savedCalls=34 dropped=0 jsonSanitized=3)
 ```
 
-- **计数含义**：
+| Counter | Meaning |
+|---|---|
+| `savedCalls` | Server LLM extraction calls saved by coalescing (merging N turns saves N−1). |
+| `dropped` | Oldest-entry drops due to a full queue (each also logs a warn). |
+| `jsonSanitized` | Pure-JSON messages stripped before write-back. |
+| `batches` / `direct` | Merged batch writes / fast-path direct writes. |
 
-| 字段 | 含义 |
-|------|------|
-| `savedCalls` | 累计省下的服务端 LLM 抽取调用数（合并 N 轮 = 省 N−1 次） |
-| `dropped` | 队列满（默认 50）丢最旧待写条的次数，同时打一条 warn |
-| `jsonSanitized` | 被剥除的纯 JSON 消息条数（防键名/工具输出当「事实」入库） |
-| `batches` / `direct` | 批量合并写入次数 / 快速直写次数（超长或合并关闭时） |
+Queue drops log a warn; JSON stripping and fast-path writes are debug-level;
+breaker transitions and failed direct writes always warn.
 
-队列丢最旧（warn）：`[dsh-mem0] mem0 sync queue full (50), dropped oldest pending turn`；
-JSON 剥除与快速直写为 debug 级。熔断开合、直接写在失败时均有 warn。
-
-## 超时分层（与 hermes 同步）
-
-| 层级 | 默认值 | 说明 |
-|------|--------|------|
-| HTTP 总闸 `requestTimeoutMs` | 300s | 插件→server 单请求上限；server 内 LLM 三层兜底最坏 180s，正常召回摸不到总闸 |
-| 召回形态 | 工具驱动 | 不再做后台预取注入；模型先调 `mem0_search`（内部蒸馏+搜索），工具卡在 UI 即召回动作 |
-| 工具级额外限時 | 无 | 有意不设——只有总闸一层，与 hermes 行为一致 |
-
-## 本地验证
+## Development & testing
 
 ```bash
-cd /data/code/mem0_falkordb/plugins/dsh-mem0-plugins
-node test/smoke.mjs         # Host 半：apply 全链路 + 工具（含蒸馏）+ 写入链路 + 强制提醒 + 卫生（76 项）
-node test/client-smoke.mjs  # Client 半：bundle 加载 + locale/slot 注册 + 表单 save 真链（28 项）
+git clone <this-repo> && cd dsh-mem0-plugins
+npm install                # or symlink your dsh node_modules for offline dev
+node test/smoke.mjs        # host half: apply pipeline + tools + write path + guards
+node test/client-smoke.mjs # client half: bundle load + locale/slots + settings form save
 ```
 
-真机联测记录（2026-08-23，本机 mem0-dev 栈）：
+## Troubleshooting
 
-```
-Mem0Client.search OK in 2121 ms; hits: 1; breaker failures: 0
-no-auth rejected as expected: Mem0HttpError | HTTP 401
-```
+| Symptom | Fix |
+|---|---|
+| Tools report "plugin disabled" | Turn `enabled` on in the settings page and check `host`. |
+| "circuit breaker open" | The server failed repeatedly. Restore the server and wait out the cooldown, or lower `breakerThreshold`. |
+| HTTP 401 | `apiKey` missing/wrong — required unless the server runs `AUTH_DISABLED=true`. |
+| "server unreachable" | Confirm reachability: `curl http://<host>/openapi.json`. |
+| Memories never recalled | Nothing relevant under that `userId` (check `GET /memories`), or the model skipped `mem0_search` — verify the forced-recall notice isn't being skipped along with its tool card. |
 
-## 排障
+## Documentation
 
-| 现象 | 处置 |
-|------|------|
-| 工具返回「插件未启用」 | 设置页打开 `enabled` 并确认 `host` 已填 |
-| 「circuit breaker open」 | 服务端连挂多次触发熔断；检查 server 后等冷却或调低阈值 |
-| HTTP 401 | `apiKey` 缺失或错误（非 AUTH_DISABLED 部署必须填 ADMIN_API_KEY） |
-| 「server unreachable」 | `curl http://<host>/openapi.json` 先确认可达性 |
-| 记忆没被召回 | 该 user_id 下无相关记忆（`GET /memories` 查看）；模型未调 mem0_search（检查 `forceRecallStep` 提醒是否被 UI 注记与工具卡跳过） |
+- [docs/COMPARISON.md](docs/COMPARISON.md) — design notes vs. the hermes
+  original, including the platform timing constraints that shaped the
+  tool-driven recall (Chinese).
+
+## License
+
+[MIT](LICENSE) © 2026 dsh-mem0 contributors
