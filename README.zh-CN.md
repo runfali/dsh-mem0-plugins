@@ -12,7 +12,7 @@
 
 > [!IMPORTANT]
 > **兼容性——请先阅读。** 本插件对接的是
-> [`dlhermes/mem0_falkordb`](https://github.com/dlhermes/mem0_falkordb)
+> [`runfali/mem0-graph`](https://github.com/runfali/mem0-graph)
 > 项目的自定义 HTTP API（`X-API-Key` 鉴权、`POST /search`、
 > `POST/PUT/DELETE /memories`、`POST /evolve/feedback`），**仅适用于**
 > 从该项目部署的 server。不支持 Mem0 Cloud，也不兼容 mem0 官方 OSS REST/SDK
@@ -68,7 +68,7 @@
 ## 环境要求
 
 - Node.js ≥ 22 与可用的 [DeepSeek Harness](https://deepseek.com) 安装（web profile）。
-- 一台从 [dlhermes/mem0_falkordb](https://github.com/dlhermes/mem0_falkordb)
+- 一台从 [runfali/mem0-graph](https://github.com/runfali/mem0-graph)
   部署并可通过 HTTP 访问的 server（如 `http://127.0.0.1:8888`）。
 - 服务端开启鉴权时需在其 Dashboard 创建 API Key；`AUTH_DISABLED=true`
   部署留空即可。
@@ -97,7 +97,7 @@ profile 层默认值。
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | `true` | 总开关。关闭后不召回、不写入，工具返回「插件未启用」。 |
-| `host` | `http://127.0.0.1:8888` | 自托管 mem0_falkordb server 地址。 |
+| `host` | `http://127.0.0.1:8888` | 自托管 mem0-graph server 地址。 |
 | `apiKey` | 空 | 以 `X-API-Key` 头发送；`AUTH_DISABLED` 部署留空。 |
 | `userId` | `dsh-user` | 记忆归属 user_id，跨会话共享同一份记忆。 |
 | `agentId` | `dsh` | 写入附带的 agent_id。 |

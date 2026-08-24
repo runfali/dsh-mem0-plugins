@@ -14,7 +14,7 @@ and written back automatically.
 
 > [!IMPORTANT]
 > **Compatibility — read this first.** This plugin speaks the custom HTTP API of
-> [`dlhermes/mem0_falkordb`](https://github.com/dlhermes/mem0_falkordb)
+> [`runfali/mem0-graph`](https://github.com/runfali/mem0-graph)
 > (`X-API-Key` auth, `POST /search`, `POST/PUT/DELETE /memories`,
 > `POST /evolve/feedback`) and works **only** against a server deployed from that
 > project. It does **not** support Mem0 Cloud or the official mem0 OSS REST/SDK
@@ -72,7 +72,7 @@ Four tools are registered under the dsh agent:
 
 - Node.js ≥ 22 and a working [DeepSeek Harness](https://deepseek.com) install
   (web profile).
-- A running [dlhermes/mem0_falkordb](https://github.com/dlhermes/mem0_falkordb)
+- A running [runfali/mem0-graph](https://github.com/runfali/mem0-graph)
   server reachable over HTTP (e.g. `http://127.0.0.1:8888`).
 - If the server runs with auth enabled, an API key created from its dashboard.
   With `AUTH_DISABLED=true`, leave the key empty.
@@ -103,7 +103,7 @@ saved there override profile-layer defaults.
 | Key | Default | Description |
 |---|---|---|
 | `enabled` | `true` | Master switch. When off: no recall, no writes, tools report "plugin disabled". |
-| `host` | `http://127.0.0.1:8888` | Base URL of the self-hosted mem0_falkordb server. |
+| `host` | `http://127.0.0.1:8888` | Base URL of the self-hosted mem0-graph server. |
 | `apiKey` | *(empty)* | Sent as the `X-API-Key` header. Leave empty for `AUTH_DISABLED` deployments. |
 | `userId` | `dsh-user` | Owner of the memories; shared across sessions. |
 | `agentId` | `dsh` | Attached as `agent_id` on writes. |
