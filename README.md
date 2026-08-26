@@ -152,7 +152,7 @@ saved there override profile-layer defaults.
 | `queueMaxLen` | `50` | Pending-write queue cap; oldest entry dropped when full. |
 | `breakerThreshold` | `5` | Consecutive failures that open the circuit breaker. |
 | `breakerCooldownMs` | `120000` | Breaker cooldown before half-open retry. |
-| `requestTimeoutMs` | `300000` | Hard per-request cap shared by search/add (mirrors hermes `httpx timeout=300.0`; worst-case server-side LLM fallback is ~180 s). There is deliberately no second tool-level timeout. |
+| `requestTimeoutMs` | `420000` | Hard per-request cap shared by search/add (mirrors hermes `httpx timeout=420.0`; worst-case server-side LLM fallback is ~360 s). There is deliberately no second tool-level timeout. |
 
 ![Reliability settings: queue, breaker, request timeout](docs/screenshot/settings-reliability.png)
 
