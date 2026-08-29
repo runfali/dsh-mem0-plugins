@@ -184,6 +184,9 @@ function resolveConfigManually(schema, entry) {
     coalesceMaxTurns: 5,
     coalesceMaxChars: 4000,
     fastpathChars: 2000,
+    sliceThreshold: 8000,
+    slicePieceChars: 2000,
+    maxBucketAgeMs: 1800000,
     queueMaxLen: 50,
     breakerThreshold: 5,
     breakerCooldownMs: 120000,
@@ -335,6 +338,9 @@ console.log('== Host apply 全链路 ==')
 const env = makeCtx({})
 apply(env.ctx, { host: 'http://mock:9999' })
 
+// 桶存活上限接线（2026-08-29 一轮审计 P3-1）：schema 默认值进 scope、spec() 透传
+assert.equal(env.getScope().maxBucketAgeMs, 1800000, 'maxBucketAgeMs 默认值应进 scope')
+
 const emit = (event, ...args) => Promise.all((env.listeners.get(event) || []).map((cb) => cb(...args)))
 const emitOn = (actx, event, ...args) => Promise.all((actx.listeners.get(event) || []).map((cb) => cb(...args)))
 const spawn = (id) => { const a = env.ctx.createAgent(id); return a }
@@ -438,6 +444,25 @@ console.log('== 第一步强制搜索提醒 ==')
   const d4 = await preSteps[0]({ messages: [{ role: 'user', content: [{ type: 'text', text: '查一下端口' }], source: { kind: 'user' } }], turn: 3, step: 1, signal: null }, nextBase)
   assert.equal(d4.messages.length, 1); ok('forceRecallStep=off 不注入')
   env.setScope({ ...env.getScope(), forceRecallStep: true })
+}
+
+console.log('== pre-step 单次调用（2026-08-29 一轮审计 P2-1）==')
+{
+  const [agentP] = await spawnAll(['sess-P'])
+  const preSteps = agentP.listeners.get('agent/pre-step') || []
+  assert.ok(preSteps.length >= 1, 'pre-step 监听未注册')
+  let calls = 0
+  const nextBoom = async () => { calls += 1; throw new Error('downstream exploded') }
+  await assert.rejects(
+    () => preSteps[0]({ messages: [{ role: 'user', content: [{ type: 'text', text: '实义问题' }], source: { kind: 'user' } }], turn: 1, step: 1, signal: null }, nextBoom),
+    /downstream exploded/
+  )
+  assert.equal(calls, 1, '上游失败时 next 只能调用一次（旧 catch return next() 会把下游链重放两遍）')
+  ok('pre-step 上游失败原样上抛且 next 单次调用')
+  // 重构不回归：正常注入路径照旧
+  const nextBase2 = async () => ({ kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: 'q' }], source: { kind: 'user' } }] })
+  const dP = await preSteps[0]({ messages: [{ role: 'user', content: [{ type: 'text', text: '记忆里有什么' }], source: { kind: 'user' } }], turn: 1, step: 1, signal: null }, nextBase2)
+  assert.equal(dP.messages.length, 2); ok('重构后正常注入不回归')
 }
 
 console.log('== 启用后：写入链路 ==')
@@ -605,6 +630,19 @@ console.log('== 单元：大 payload 切片（2026-08-29 502 教训，全量保�
   q2.drain()
   await new Promise((r) => setTimeout(r, 10))
   assert.equal(q2.stats.sliced, 0); ok('未超阈值不切片')
+  // 码点安全（2026-08-29 一轮审计 P2）：无换行长文硬切，切点恰落在 emoji 代理对中间时
+  // 回退一个 UTF-16 单元，绝不出孤代理（旧行为 piece1 尾部残留孤立 D83D）
+  const emojiText = 'a'.repeat(1997) + '😀' + 'b'.repeat(10)
+  const emojiPieces = sliceText(emojiText, 1998)
+  assert.equal(emojiPieces.join(''), emojiText, '码点全量保留（无截断）')
+  for (const p of emojiPieces) {
+    if (!p.length) continue
+    const first = p.charCodeAt(0)
+    const last = p.charCodeAt(p.length - 1)
+    assert.ok(!(last >= 0xD800 && last <= 0xDBFF), '片尾不得残留孤立高代理')
+    assert.ok(!(first >= 0xDC00 && first <= 0xDFFF), '片头不得残留孤立低代理')
+  }
+  ok('sliceText 硬切边界码点安全（emoji 不切半）')
 }
 
 console.log('== 单元：有界队列丢最旧 ==')
@@ -918,6 +956,54 @@ console.log('== 单元：毒桶存活上限 + 失败退避（2026-08-29 事故�
   assert.equal(tries, 1, '退避窗口内不得重投'); ok('失败退避：30s 内不重投')
   await q2.flushDue(Date.now() + 31000); await settle()    // 退避到期
   assert.equal(tries, 2, '退避到期后应重试'); ok('退避到期后照常重试')
+}
+
+console.log('== 单元：超时类毒桶裁剪（2026-08-29 一轮审计 P2-3）==')
+{
+  const { TidalCoalescer } = await import('../src/coalesce.js')
+  const holdBig = () => ({ enabled: true, idleMs: 60000, windowMs: 60000, maxTurns: 200, maxChars: 1000000, fastpathChars: 200000, cooldownMs: 120000 })
+  const fillTurns = (q, n) => { for (let i = 0; i < n; i++) q.route({ userId: 'u', sessionId: 's', userContent: '问' + i, assistantContent: '答' + i }) }
+
+  // A) timeout 包装错误 + 30 轮 → 裁到最近 20 轮（40 条消息），裁掉 10 轮计 dropped
+  let attempts = 0
+  const q3 = new TidalCoalescer({
+    resolve: holdBig,
+    addFn: async () => { attempts += 1; throw new Error('mem0 server unreachable at http://x (mem0 request timed out after 420000 ms)') },
+    log: {}
+  })
+  fillTurns(q3, 30)
+  assert.equal(q3.buckets.get('u\u0000s').messages.length, 60)
+  await q3.flushBucket('u\u0000s', 'test')
+  const b3 = q3.buckets.get('u\u0000s')
+  assert.ok(b3, '超时失败后桶应保留待重试')
+  assert.equal(b3.messages.length, 40, '超时毒桶应裁到 40 条消息（20 轮）')
+  assert.equal(q3.stats.dropped, 10, '裁掉的 10 轮应计入 dropped')
+  assert.equal(b3.chars, 120, 'chars 应按剩余消息重算（后 20 轮每条 3 字 × 40 条）')
+  await q3.flushBucket('u\u0000s', 'test')
+  assert.equal(q3.buckets.get('u\u0000s').messages.length, 40, '已裁到 20 轮后不再继续裁')
+  assert.equal(attempts, 2, '两次都真实发起了冲刷'); ok('超时毒桶裁到 20 轮并收敛')
+
+  // B) 网络级失败（无 timed out 文案）→ 不裁剪（宕机不丢语义不变）
+  const q4 = new TidalCoalescer({
+    resolve: holdBig,
+    addFn: async () => { throw new Error('mem0 server unreachable at http://x (fetch failed)') },
+    log: {}
+  })
+  fillTurns(q4, 30)
+  await q4.flushBucket('u\u0000s', 'test')
+  assert.equal(q4.buckets.get('u\u0000s').messages.length, 60, '宕机类失败不得裁桶')
+  assert.equal(q4.stats.dropped, 0); ok('网络级失败不裁剪（宕机不丢）')
+
+  // C) 超时但桶很小（≤20 轮）→ 无需裁剪
+  const q5 = new TidalCoalescer({
+    resolve: holdBig,
+    addFn: async () => { throw new Error('mem0 server unreachable at http://x (mem0 request timed out after 420000 ms)') },
+    log: {}
+  })
+  fillTurns(q5, 3)
+  await q5.flushBucket('u\u0000s', 'test')
+  assert.equal(q5.buckets.get('u\u0000s').messages.length, 6, '小桶超时不裁')
+  assert.equal(q5.stats.dropped, 0); ok('小桶超时不受影响')
 }
 
 console.log('== 中断轮不入记忆 ==')

@@ -74,6 +74,9 @@ export const Config = z.object({
   // ≤slicePieceChars 的多条消息，全量保留；服务端逐条分块、accumulated 合并。
   sliceThreshold: z.number().step(1).min(200).max(200000).default(8000),
   slicePieceChars: z.number().step(1).min(200).max(200000).default(2000),
+  // 潮浪桶存活上限（2026-08-29 毒桶事故）：超龄且「服务端明确拒绝过」才丢弃；
+  // 连接级失败不计龄（宕机不丢）。此前注释称可配置但三处接线缺失，设置页调不到。
+  maxBucketAgeMs: z.number().step(1).min(60000).max(7200000).default(1800000),
   queueMaxLen: z.number().step(1).min(5).max(1000).default(50),
   breakerThreshold: z.number().step(1).min(1).max(100).default(5),
   breakerCooldownMs: z.number().step(1).min(1000).max(3600000).default(120000),
@@ -196,6 +199,7 @@ export function apply(ctx, config = {}) {
       fastpathChars: clampInt(value.fastpathChars, 200, 200000, 2000),
       sliceThreshold: clampInt(value.sliceThreshold, 200, 200000, 8000),
       slicePieceChars: clampInt(value.slicePieceChars, 200, 200000, 2000),
+      maxBucketAgeMs: clampInt(value.maxBucketAgeMs, 60000, 7200000, 1800000),
       queueMaxLen: clampInt(value.queueMaxLen, 5, 1000, 50),
       breakerThreshold: clampInt(value.breakerThreshold, 1, 100, 5),
       breakerCooldownMs: clampInt(value.breakerCooldownMs, 1000, 3600000, 120000),
@@ -249,8 +253,19 @@ export function apply(ctx, config = {}) {
       }
     })
     agent.ctx.on('agent/pre-step', async (payload, next) => {
+      // next() 单次调用（2026-08-29 一轮审计 P2-1，同 session-track B 组 P2-2 教训）：
+      // cordis waterfall 的 next() 是 `cbs.shift() ?? inner` 链——catch 里再调一次会把
+      // 下游全部监听器（含其他插件的注入副作用）原样重放一遍。上游失败原样上抛
+      // （不能返回 undefined：运行时读 decision.kind 会 TypeError）；
+      // 注入逻辑单独 try/catch，失败返回原 decision。
+      let decision
       try {
-        const decision = await next()
+        decision = await next()
+      } catch (error) {
+        log.debug('pre-step upstream failed: ' + String((error && error.message) || error))
+        throw error
+      }
+      try {
         if (!decision || decision.kind !== 'enter' || !decision.messages) return decision
         const s = spec()
         if (!s.enabled || !s.host) return decision
@@ -279,7 +294,7 @@ export function apply(ctx, config = {}) {
         return { kind: 'enter', messages: [...decision.messages, reminder] }
       } catch (error) {
         log.debug('recall reminder injection failed: ' + String((error && error.message) || error))
-        return next()
+        return decision
       }
     })
     agent.ctx.on('agent/turn-stopping', (stopping) => {
@@ -333,6 +348,7 @@ export function apply(ctx, config = {}) {
         fastpathChars: s.fastpathChars,
         sliceThreshold: s.sliceThreshold,
         slicePieceChars: s.slicePieceChars,
+        maxBucketAgeMs: s.maxBucketAgeMs,
         queueMaxLen: s.queueMaxLen,
         // 供 coalescer 区分「同段连续故障」与「跨冷却的新故障段」：
         // 半开窗口的真实失败间隔≈冷却时长，超过即重置重试计数
