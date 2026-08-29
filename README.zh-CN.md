@@ -136,7 +136,8 @@ profile 层默认值。
 | `coalesceMaxTurns` | `5` | 桶内轮数上限。 |
 | `coalesceMaxChars` | `4000` | 桶内字符上限。 |
 | `fastpathChars` | `2000` | 单轮超过该长度绕过桶直接落库。 |
-| `maxWriteChars` | `4000` | 单次写入 payload 硬上限，超限截断保头（服务端抽取窗口约 4300 字符，超长直写会触发 502）。 |
+| `sliceThreshold` | `8000` | 单条消息超过该长度按段落切片（服务端分块按消息粒度、单条不拆，超长单条会撑爆抽取窗口）。 |
+| `slicePieceChars` | `2000` | 切片后每片字符上限（实测服务端单条安全值 ≈2000）；切片全量保留、服务端分块提取后合并。 |
 | `redactEnabled` | `true` | 写回载荷上传前脱敏（命中替换为 `[REDACTED:*]` 标记）。关闭 = 原样上传。 |
 | `feedbackEnabled` | `true` | update/delete 成功后上报 evolve 反馈。 |
 
