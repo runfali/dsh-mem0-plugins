@@ -142,6 +142,7 @@ saved there override profile-layer defaults.
 | `coalesceMaxTurns` | `5` | Max turns per bucket. |
 | `coalesceMaxChars` | `4000` | Max characters per bucket. |
 | `fastpathChars` | `2000` | Turns longer than this skip the bucket and write immediately. |
+| `maxWriteChars` | `4000` | Hard cap on a single write payload; over-limit content is truncated (head kept) — the server extraction window is ~4300 chars and oversized direct writes trigger 502s. |
 | `redactEnabled` | `true` | Redact secrets in write-back payloads before they leave for extraction (replaced with `[REDACTED:*]` markers). Off = payloads leave as-is. |
 | `feedbackEnabled` | `true` | Report evolve feedback after successful update/delete. |
 
