@@ -52,6 +52,7 @@ It ships as a standard dsh bundle plugin: `dsh plugin add` to install,
 | **Forced recall step** | First step of every turn | Injects a plugin-source reminder ("search memory before answering") via `agent/pre-step`. Trivial turns are skipped; disable with `forceRecallStep`. |
 | **Automatic write-back** | After every completed turn | Sends "user message + assistant reply" to the server-side LLM extraction (`infer: true`). Pure-JSON tool output is replaced with placeholders so key names never leak in as "facts". |
 | **Tidal coalescing** | At write time | Short turns of the same session are bucketed per user and flushed as one batched write (idle 5 s / window 15 s / 5 turns / 4 000 chars — whichever hits first), amortizing server LLM extraction calls. Oversized messages (> 2 000 chars) bypass the bucket and write directly. |
+| **Upload redaction** | Before write-back | Every user/assistant text passes a pure-function secret gate before leaving for server-side extraction: `sk-`-style API keys, AWS keys, Bearer/X-API-Key headers, PEM private-key blocks, `password=` pairs and `.env`-style blocks are replaced with `[REDACTED:label]` markers (a `.env` block is folded into one marker). Session text and UI are untouched. Disable with `redactEnabled`. |
 | **Evolve feedback loop** | After update/delete | Best-effort `POST /evolve/feedback` (`correction` / `useless`) feeds the server-side salience evolution. |
 
 Interrupted turns are never written: a half-streamed reply is not a durable
@@ -120,8 +121,8 @@ saved there override profile-layer defaults.
 | `distillEnabled` | `true` | Master switch for query distillation (see below). |
 | `distillMinChars` | `500` | Queries up to this length go straight to `/search` unchanged — zero loss, zero extra calls. |
 | `distillInputMaxChars` | `8000` | Truncation cap for text sent to the distillation model. |
-| `distillBaseUrl` | author's private endpoint | OpenAI-compatible endpoint used to distill long queries. Empty = skip distillation. **The shipped default points at the author's internal deployment — override it with your own endpoint.** |
-| `distillApiKey` | author's private key | Bearer token for the distillation endpoint. |
+| `distillBaseUrl` | *(empty)* | OpenAI-compatible endpoint used to distill long queries. Empty = skip distillation and search the original query. |
+| `distillApiKey` | *(empty)* | Bearer token for the distillation endpoint. |
 | `distillModel` | `Qwen3.5-9B` | Distillation model id (a small local model is plenty). |
 | `distillTimeoutMs` | `90000` | Per-request distillation timeout. |
 | `distillRetryAfterMs` | `20000` | Hedged-request threshold: if the first request is still silent after this delay, fire a second concurrent one; first response wins. |
@@ -141,6 +142,7 @@ saved there override profile-layer defaults.
 | `coalesceMaxTurns` | `5` | Max turns per bucket. |
 | `coalesceMaxChars` | `4000` | Max characters per bucket. |
 | `fastpathChars` | `2000` | Turns longer than this skip the bucket and write immediately. |
+| `redactEnabled` | `true` | Redact secrets in write-back payloads before they leave for extraction (replaced with `[REDACTED:*]` markers). Off = payloads leave as-is. |
 | `feedbackEnabled` | `true` | Report evolve feedback after successful update/delete. |
 
 ![Write-back settings: coalescing thresholds, fast path, evolve feedback](docs/screenshot/settings-write-back.png)
@@ -222,7 +224,7 @@ otherwise watch the dsh process stdout.
 Every merged flush logs one info line with cumulative totals:
 
 ```text
-[dsh-mem0] mem0 coalesced 3 turn(s) into 1 write (session=<id>, saved 2 call(s), chars=512, trigger=idle; totals: batches=12 savedCalls=34 dropped=0 jsonSanitized=3)
+[dsh-mem0] mem0 coalesced 3 turn(s) into 1 write (session=<id>, saved 2 call(s), chars=512, trigger=idle; totals: batches=12 savedCalls=34 dropped=0 jsonSanitized=3 redacted=0)
 ```
 
 | Counter | Meaning |
@@ -230,10 +232,16 @@ Every merged flush logs one info line with cumulative totals:
 | `savedCalls` | Server LLM extraction calls saved by coalescing (merging N turns saves N−1). |
 | `dropped` | Oldest-entry drops due to a full queue (each also logs a warn). |
 | `jsonSanitized` | Pure-JSON messages stripped before write-back. |
+| `redacted` | Secret labels replaced in payloads this process lifetime (also carried in the totals line). |
 | `batches` / `direct` | Merged batch writes / fast-path direct writes. |
 
 Queue drops log a warn; JSON stripping and fast-path writes are debug-level;
-breaker transitions and failed direct writes always warn.
+breaker transitions and failed direct writes always warn. Secret redactions
+warn once per session and label:
+
+```text
+[dsh-mem0] mem0 upload redacted 1 secret label(s) [openai-key] before infer (session=<id>)
+```
 
 ## Development & testing
 

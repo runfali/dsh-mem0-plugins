@@ -50,6 +50,7 @@
 | **强制召回步** | 每轮第一步 | 经 `agent/pre-step` 注入 plugin-source 提醒「先搜记忆再作答」。琐碎轮自动跳过；`forceRecallStep` 可关。 |
 | **自动写入** | 每轮对话结束 | 把「用户消息 + 助手回复」交给服务端 LLM 抽取事实（`infer: true`）；纯 JSON 的工具输出替换为占位符，键名不会混入「事实」。 |
 | **潮浪并忆** | 写入时 | 同一会话短对话按 user 分桶合并：空闲 5 s / 窗口 15 s / 5 轮 / 4000 字符任一达标即合并为一次批量写入，摊薄服务端抽取调用；超长消息（>2000 字符）绕过桶快速直写。 |
+| **上传脱敏** | 写回前 | 每条 user/assistant 文本在交给服务端抽取 LLM 前先过一道纯函数密钥闸：`sk-` 风格 API key、AWS key、Bearer/X-API-Key 头、PEM 私钥块、`password=` 键值与 `.env` 形态整段折叠，命中替换为 `[REDACTED:label]` 标记。会话原文与界面不受影响；`redactEnabled` 可关。 |
 | **进化反馈闭环** | update/delete 后 | 尽力而为上报 `POST /evolve/feedback`（`correction` / `useless`），参与服务端 salience 进化。 |
 
 被打断的轮次永不写入：半截流式回复不是持久的对话真相。
@@ -114,8 +115,8 @@ profile 层默认值。
 | `distillEnabled` | `true` | 查询蒸馏总开关（见下文）。 |
 | `distillMinChars` | `500` | 不超过该长度的消息原样直查 `/search`——零损失零开销。 |
 | `distillInputMaxChars` | `8000` | 送入蒸馏模型的原文截断上限。 |
-| `distillBaseUrl` | 作者私有端点 | 蒸馏长查询用的 OpenAI 兼容端点；留空跳过蒸馏。**出厂默认指向作者内网部署——请改成你自己的端点。** |
-| `distillApiKey` | 作者私有 Key | 蒸馏端点 Bearer Token。 |
+| `distillBaseUrl` | *（空）* | 蒸馏长查询用的 OpenAI 兼容端点；留空跳过蒸馏、直查原文。 |
+| `distillApiKey` | *（空）* | 蒸馏端点 Bearer Token。 |
 | `distillModel` | `Qwen3.5-9B` | 蒸馏模型 id（本地小模型足矣）。 |
 | `distillTimeoutMs` | `90000` | 蒸馏单次超时。 |
 | `distillRetryAfterMs` | `20000` | 双飞触发阈值：首请求超过该时长仍无响应即并发第二请求，先完成者胜出。 |
@@ -135,6 +136,7 @@ profile 层默认值。
 | `coalesceMaxTurns` | `5` | 桶内轮数上限。 |
 | `coalesceMaxChars` | `4000` | 桶内字符上限。 |
 | `fastpathChars` | `2000` | 单轮超过该长度绕过桶直接落库。 |
+| `redactEnabled` | `true` | 写回载荷上传前脱敏（命中替换为 `[REDACTED:*]` 标记）。关闭 = 原样上传。 |
 | `feedbackEnabled` | `true` | update/delete 成功后上报 evolve 反馈。 |
 
 ![写入设置：合并阈值、快速直写、进化反馈](docs/screenshot/settings-write-back.png)
@@ -146,7 +148,7 @@ profile 层默认值。
 | `queueMaxLen` | `50` | 待写队列上限，满时丢最旧。 |
 | `breakerThreshold` | `5` | 连续失败达该次数熔断。 |
 | `breakerCooldownMs` | `120000` | 熔断冷却时长，到期后半开重试。 |
-| `requestTimeoutMs` | `300000` | search/add 共用的单请求硬上限（对齐 hermes `httpx timeout=300.0`；服务端 LLM 兜底最坏约 180 s）。有意不设第二层工具级超时。 |
+| `requestTimeoutMs` | `420000` | search/add 共用的单请求硬上限（对齐 hermes `httpx timeout=420.0`；服务端 LLM 兜底最坏约 360 s）。有意不设第二层工具级超时。 |
 
 ![可靠性设置：队列、熔断、总闸](docs/screenshot/settings-reliability.png)
 
@@ -206,7 +208,7 @@ systemd 部署看 `journalctl -u dsh.service -f`；否则看 dsh 进程 stdout�
 每次合并冲刷打一条 info 日志，含累计 totals：
 
 ```text
-[dsh-mem0] mem0 coalesced 3 turn(s) into 1 write (session=<id>, saved 2 call(s), chars=512, trigger=idle; totals: batches=12 savedCalls=34 dropped=0 jsonSanitized=3)
+[dsh-mem0] mem0 coalesced 3 turn(s) into 1 write (session=<id>, saved 2 call(s), chars=512, trigger=idle; totals: batches=12 savedCalls=34 dropped=0 jsonSanitized=3 redacted=0)
 ```
 
 | 计数 | 含义 |
@@ -214,9 +216,14 @@ systemd 部署看 `journalctl -u dsh.service -f`；否则看 dsh 进程 stdout�
 | `savedCalls` | 合并为写入省下的服务端抽取调用数（合并 N 轮 = 省 N−1 次）。 |
 | `dropped` | 队列满丢最旧的次数（每次另打一条 warn）。 |
 | `jsonSanitized` | 写回前被剥除的纯 JSON 消息条数。 |
+| `redacted` | 本进程生命周期内载荷中被替换的密钥标签数（totals 行同样携带）。 |
 | `batches` / `direct` | 批量合并写入 / 快速直写次数。 |
 
-队列丢弃打 warn；JSON 剥除与快速直写为 debug 级；熔断开合与直写失败必打 warn。
+队列丢弃打 warn；JSON 剥除与快速直写为 debug 级；熔断开合与直写失败必打 warn；脱敏命中按会话+标签去重后打 warn：
+
+```text
+[dsh-mem0] mem0 upload redacted 1 secret label(s) [openai-key] before infer (session=<id>)
+```
 
 ## 开发与测试
 
