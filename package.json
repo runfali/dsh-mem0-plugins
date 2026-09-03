@@ -1,6 +1,6 @@
 {
   "name": "dsh-mem0-plugins",
-  "version": "0.2.0",
+  "version": "0.1.2-rc.1",
   "description": "Mem0 persistent memory for the DeepSeek Harness web profile — automatic recall injection, tidal-coalesced memory writes, and mem0_search/add/update/delete tools against a self-hosted Mem0 server (X-API-Key). Zero-intrusion bundle plugin; no dsh source changes.",
   "type": "module",
   "main": "src/index.js",
