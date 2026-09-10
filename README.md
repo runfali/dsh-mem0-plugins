@@ -72,7 +72,11 @@ Four tools are registered under the dsh agent:
 ## Requirements
 
 - Node.js ≥ 22 and a working [DeepSeek Harness](https://deepseek.com) install
-  (web profile).
+  (web profile). Tested against **dsh `0.1.5-rc.1`**; the declared range is
+  `>=0.1.2-alpha.3 <0.2.0 || >=0.1.5-alpha.1 <0.1.6` (the disjunction is not
+  redundant — npm's pre-release rule means a single `>=0.1.2-alpha.3 <0.2.0`
+  range does **not** cover `0.1.5-rc.1`). The plugin targets the web profile's
+  host + client halves.
 - A running [runfali/mem0-graph](https://github.com/runfali/mem0-graph)
   server reachable over HTTP (e.g. `http://127.0.0.1:8888`).
 - If the server runs with auth enabled, an API key created from its dashboard.
@@ -250,8 +254,10 @@ warn once per session and label:
 ```bash
 git clone <this-repo> && cd dsh-mem0-plugins
 npm install                # or symlink your dsh node_modules for offline dev
+node test/entry.test.mjs   # host entry: real import + inject face + engines range guard
 node test/smoke.mjs        # host half: apply pipeline + tools + write path + guards
 node test/client-smoke.mjs # client half: bundle load + locale/slots + settings form save
+node --test test/*.test.mjs # pure-function units (redaction, output formatting)
 ```
 
 ## Troubleshooting

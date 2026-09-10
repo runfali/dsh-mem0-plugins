@@ -69,6 +69,9 @@
 ## 环境要求
 
 - Node.js ≥ 22 与可用的 [DeepSeek Harness](https://deepseek.com) 安装（web profile）。
+  已针对 **dsh `0.1.5-rc.1`** 实测；声明区间为
+  `>=0.1.2-alpha.3 <0.2.0 || >=0.1.5-alpha.1 <0.1.6`（析取不是冗余——按 npm
+  预发布规则，单区间 `>=0.1.2-alpha.3 <0.2.0` **不覆盖** `0.1.5-rc.1`）。
 - 一台从 [runfali/mem0-graph](https://github.com/runfali/mem0-graph)
   部署并可通过 HTTP 访问的 server（如 `http://127.0.0.1:8888`）。
 - 服务端开启鉴权时需在其 Dashboard 创建 API Key；`AUTH_DISABLED=true`
@@ -232,8 +235,10 @@ systemd 部署看 `journalctl -u dsh.service -f`；否则看 dsh 进程 stdout�
 ```bash
 git clone <本仓库> && cd dsh-mem0-plugins
 npm install                # 或 symlink 本机 dsh node_modules 以离线开发
+node test/entry.test.mjs   # 宿主入口：真实 import + 注入面 + engines 区间守护
 node test/smoke.mjs        # Host 半：apply 链路 + 工具 + 写入路径 + 守卫
 node test/client-smoke.mjs # Client 半：bundle 加载 + locale/slot + 设置表单保存真链
+node --test test/*.test.mjs # 纯函数单测（脱敏、输出格式化）
 ```
 
 ## 排障
