@@ -254,10 +254,10 @@ warn once per session and label:
 ```bash
 git clone <this-repo> && cd dsh-mem0-plugins
 npm install                # or symlink your dsh node_modules for offline dev
-node test/entry.test.mjs   # host entry: real import + inject face + engines range guard
+node --test test/*.test.mjs # host entry (real import + engines guard) + pure-function units
 node test/smoke.mjs        # host half: apply pipeline + tools + write path + guards
 node test/client-smoke.mjs # client half: bundle load + locale/slots + settings form save
-node --test test/*.test.mjs # pure-function units (redaction, output formatting)
+npm test                   # all of the above in one shot
 ```
 
 ## Troubleshooting

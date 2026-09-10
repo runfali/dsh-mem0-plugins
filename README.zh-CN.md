@@ -235,10 +235,10 @@ systemd 部署看 `journalctl -u dsh.service -f`；否则看 dsh 进程 stdout�
 ```bash
 git clone <本仓库> && cd dsh-mem0-plugins
 npm install                # 或 symlink 本机 dsh node_modules 以离线开发
-node test/entry.test.mjs   # 宿主入口：真实 import + 注入面 + engines 区间守护
+node --test test/*.test.mjs # 宿主入口（真实 import + engines 守护）+ 纯函数单测
 node test/smoke.mjs        # Host 半：apply 链路 + 工具 + 写入路径 + 守卫
 node test/client-smoke.mjs # Client 半：bundle 加载 + locale/slot + 设置表单保存真链
-node --test test/*.test.mjs # 纯函数单测（脱敏、输出格式化）
+npm test                   # 一把跑完以上全部
 ```
 
 ## 排障
