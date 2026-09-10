@@ -165,7 +165,7 @@ P0 先例（`import { z } from '@deepseek-ai/schemastery'` 而 schemastery 只�
 | `node test/smoke.mjs` | **156/156 ✓**（apply 链路 / 捕获 / 潮浪 / 熔断 / dispose 兜底） |
 | `node test/client-smoke.mjs` | **33/33 ✓**（bundle 加载 / locale / slots / 表单保存真链） |
 
-## 五、隔离实例真机 E2E（独立 `DSH_HOME=/data/dsh-workspace/.probe-dshhome`，独立端口 3599，绝不碰线上 3080/3081）
+## 五、隔离实例真机 E2E（独立 `DSH_HOME=<隔离目录>`、独立端口，绝不碰线上端口）
 
 | 项 | 结果 |
 |---|---|
@@ -184,7 +184,7 @@ P0 先例（`import { z } from '@deepseek-ai/schemastery'` 而 schemastery 只�
 | **跨会话召回** | ✅ 另起会话问「我用什么编辑器」（Neovim/~/dotfiles/nvim），模型先搜后答并正确复述 |
 | **自动写入（潮浪链路）** | ✅ headless 与 web 两条通路均落库 `channel: dsh`（非仅 `mem0_add` 直写路径） |
 | **关停句柄卫生** | ✅ headless 单跑 3.55 s 正常退出；web 实例 SIGTERM 后 2 s 退出、端口即刻释放 |
-| **线上零影响核实** | ✅ 线上 `/root/.dsh/settings.yaml` mtime 15:47:25 **全程未变**（20 段，mem0 仍是 `{apiKey, rerank}`）；线上 profile bundles 仍为 base/web-app/login-gateway/soul-md（mem0 未在线上挂载）；3080/3081 全程正常；隔离实例已关、3599 已释放 |
+| **线上零影响核实** | ✅ 线上 `settings.yaml` mtime **全程未变**、内容段数一致；线上 profile 的组合树未被改动；线上端口全程正常；隔离实例已关、独立端口已释放 |
 
 ### 探针保真度记录（防假证据）
 
@@ -198,7 +198,7 @@ P0 先例（`import { z } from '@deepseek-ai/schemastery'` 而 schemastery 只�
 - **`pkill -f "port 3599"` 会自杀**（匹配到发起命令自身的 cmdline）：本会话改用
   `ss -ltnp | grep 3599 | grep -o 'pid=[0-9]*'` 或 `ps … | grep 'dsh --profile web --port 3599'` 精确定位。
 - **`pnpm install` 在无 TTY 下会 abort 删 `node_modules`**：需 `CI=true`（或 `confirmModulesPurge=false`）。
-- **`npm` 缓存目录不可写会导致 `npm view/pack` 失败**（`/root/.npm` 权限）：用 `npm --cache /tmp/npmcache`。
+- **`npm` 缓存目录不可写会导致 `npm view/pack` 失败**（宿主 npm 缓存目录权限）：用 `npm --cache /tmp/npmcache`。
 - 隔离实例复用了线上 `.credentials.yaml` 的**副本**（`$DSH_HOME/.credentials.yaml`，0600），
   未改写线上原件；隔离 `settings.yaml` 独立，线上文件 mtime 前后逐秒一致。
 
