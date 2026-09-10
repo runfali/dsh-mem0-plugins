@@ -188,4 +188,52 @@ assert.deepEqual([...fFields].sort(), [...configKeys].sort(), 'client FIELDS 与
 assert.deepEqual([...fGroups].sort(), [...configKeys].sort(), 'client GROUPS 与 Host Config 键集合不一致')
 ok('Config / client FIELDS / client GROUPS 三处键集合全等（' + configKeys.length + ' 键）')
 
+
+
+// ---------------------------------------------------------------------------
+// 5. spec() 数值归一化的回落值 ↔ schema 默认值一致（第五处同步：归一化层）
+// ---------------------------------------------------------------------------
+// 历史缺陷类别：src/index.js 的 spec() 里每个数值键都带一个 clampInt 回落默认值
+// （第 4 参），它是 settings 层拿不到值时工具真正生效的值——与 schema 默认值不一致
+// 就是「设置页显示 A、实际生效 B」。本仓历史上 fastpathChars 等键就出现过
+// 「注释称可配置但三处接线缺失」的漂移，故这里把该层钉死。
+// 只覆盖数值键（clampInt 第 4 参语义无歧义）；字符串/布尔键有意不纳入——它们的
+// spec 表达式带两级回落（如 String(value.userId || '').trim() || 'dsh-user'），
+// 且 host/userId/agentId/distillModel 的「全空」降级路径与 schema 的 composition
+// 默认值本就不同（前者触发「未配置」提示，后者是 patch 层给的默认配置），
+// 强行比对只会产生假警报。
+const indexSrc = readFileSync(join(here, '..', 'src', 'index.js'), 'utf8')
+const specBlock = indexSrc.split('const spec = () => {')[1].split('\n  }')[0]
+const specNumeric = {}
+// 抓 clampInt(...) 整体（含闭合括号）以及紧随其后的可选单位换算 `* 1024`，
+// 例如 outputMaxBytes: clampInt(value.outputMaxKb, 1, 500, 50) * 1024
+const specTermRe = /^\s{6}([a-zA-Z][\w]*):\s*clampInt\(([^)]*)\)\s*(?:\*\s*(\d+))?/gm
+for (const m of specBlock.matchAll(specTermRe)) {
+  const args = m[2].split(',').map((a) => a.trim())
+  specNumeric[m[1]] = {
+    schemaKey: m[1] === 'outputMaxBytes' ? 'outputMaxKb' : m[1],
+    fallback: Number(args[3]),
+    multiplier: m[3] === undefined ? 1 : Number(m[3])
+  }
+}
+assert.equal(Object.keys(specNumeric).length, 20, 'spec() 数值键解析数应为 20（探针写错或 spec 结构变更时此断言先炸）')
+const specDrift = []
+for (const [key, spec] of Object.entries(specNumeric)) {
+  const schemaDefault = resolved[spec.schemaKey]
+  if (typeof schemaDefault !== 'number') { specDrift.push(key + ': schema 默认（' + spec.schemaKey + '）不是数字'); continue }
+  if (!Number.isFinite(spec.fallback)) { specDrift.push(key + ': spec 回落值不可解析'); continue }
+  const actual = spec.fallback * spec.multiplier
+  const expected = schemaDefault * spec.multiplier
+  if (actual !== expected) {
+    specDrift.push(key + ': spec 回落 ' + actual + '（对照 ' + spec.schemaKey + '），schema 默认 ' + expected)
+  }
+}
+assert.deepEqual(specDrift, [], 'spec() 归一化的数值回落值与 schema 默认值不一致: ' + specDrift.join(' | '))
+// 单位换算倍率单独钉：上面的「倍率两侧同乘」会被约掉，等于没查倍率本身。
+// outputMaxKb（设置页单位 KB）→ outputMaxBytes（回执截断实际用的字节）必须是 ×1024；
+// 改成 ×1000 这类「看起来无害」的写法会让 50KB 预算悄悄缩水 2.4%。
+assert.equal(specNumeric.outputMaxBytes && specNumeric.outputMaxBytes.multiplier, 1024,
+  'outputMaxKb → outputMaxBytes 的换算倍率必须是 1024（×1000 会让字节预算缩水）')
+ok('spec() 数值回落值与 schema 默认值逐键一致（' + Object.keys(specNumeric).length + ' 键；倍率 1024 独立断言）')
+
 console.log('\n全部通过：' + PASS.length + ' 项 ✓')
